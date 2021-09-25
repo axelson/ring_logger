@@ -285,3 +285,9 @@ iex> RingLogger.get
    ]}
 ]
 ```
+
+## Rich Error Messages
+
+To get rich error messages ensure that debugging information is not stripped out of the beam files. On Nerves that might look like editing your `:strip_beams` setting in `mix.exs` to keep `"Dbgi"`:
+
+      strip_beams: Mix.env() == :prod or [keep: ["Docs", "Dbgi"]]
