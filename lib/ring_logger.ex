@@ -260,8 +260,26 @@ defmodule RingLogger do
     {:ok, :ok, configure(opts)}
   end
 
+  def add_blame({Logger, _orig_message, time_info, metadata} = orig) do
+    case Keyword.get(metadata, :crash_reason) do
+      {maybe_exception, stacktrace} ->
+        if Exception.exception?(maybe_exception) do
+          {exception, _} = Exception.blame(:error, maybe_exception, stacktrace)
+          {Logger, Exception.format(:error, exception, stacktrace), time_info, metadata}
+        else
+          orig
+        end
+
+      _ ->
+        orig
+    end
+  end
+
+  def add_blame(orig), do: orig
+
   @impl :gen_event
   def handle_event({level, _group_leader, message}, state) do
+    message = add_blame(message)
     # Messages eventually are flattened. Flattening them immediately saves time
     # later and appears to measurably reduce memory usage and reduction count
     # in RingLogger.Server in production devices.
