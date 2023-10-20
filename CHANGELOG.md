@@ -1,5 +1,46 @@
 # Changelog
 
+This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## v0.9.0
+
+This latest release removes support for Elixir versions before 1.9.
+
+* Improvements
+  * Support multiple circular buffers and filtering based on log level. This
+    makes it possible to separate out debug and info messages so they don't push
+    out error messages. See the `README.md` for configuration examples. Thanks
+    to @oestrich for this feature.
+  * Fixed and added specs throughout
+
+## v0.8.6
+
+* Improvements
+  * Fixed crashes when converting unicode chardata. Thanks to @x4lldux for this
+    fix.
+
+## v0.8.5
+
+* Improvements
+  * `RingLogger.grep/2` supports `:before` and `:after` options
+  * Support OTP 25
+
+## v0.8.4
+
+* Fixes
+  * Default color enabled option now correctly evaluated at runtime for the active IO
+
+* Improvements
+  * `RingLogger.grep` will now highlight matches in the output if color is enabled
+
+## v0.8.3
+
+* Fixes
+  * Pull all application environment configuration from `:logger, RingLogger`
+    rather than some from there and some from `:ring_logger`. Adding
+    configuration under `:ring_logger` is still supported, but prints a
+    deprecation warning. Thanks to Jason Axelson for this fix.
+
 ## v0.8.2
 
 * Improvements

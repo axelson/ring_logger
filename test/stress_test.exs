@@ -3,6 +3,9 @@ defmodule StressTest do
 
   require Logger
 
+  # Elixir 1.4 changed the default pattern (removed $levelpad) so hardcode a default
+  # pattern here
+  @default_pattern "\n$time $metadata[$level] $message\n"
   @ring_size 11
 
   setup do
@@ -14,7 +17,12 @@ defmodule StressTest do
     Logger.flush()
 
     Logger.add_backend(RingLogger)
-    Logger.configure_backend(RingLogger, max_size: @ring_size)
+
+    Logger.configure_backend(RingLogger,
+      max_size: @ring_size,
+      format: @default_pattern,
+      buffers: []
+    )
 
     on_exit(fn ->
       RingLogger.TestIO.stop(pid)
@@ -24,19 +32,12 @@ defmodule StressTest do
     {:ok, [io: pid]}
   end
 
-  @doc """
-  Ensure that a log message makes it way through the logger processes.
-
-  The RingLogger needs to be attached for this to work. This makes
-  logging synchronous so that we can test tail, next, grep, etc. that
-  rely on the messages being received by RingLogger.
-  """
-  def handshake_log(io, level, message) do
+  defp handshake_log(io, level, message) do
     Logger.log(level, message)
     assert_receive {:io, msg}
     assert String.contains?(msg, to_string(level))
 
-    flattened_message = IO.iodata_to_binary(message)
+    flattened_message = IO.chardata_to_string(message)
     assert String.contains?(msg, flattened_message)
     io
   end
@@ -60,7 +61,7 @@ defmodule StressTest do
           assert_receive {:io, messages}, 100
 
           for j <- 1..k do
-            assert messages =~ "[info]  #{k}: starter #{j}"
+            assert messages =~ "[info] #{k}: starter #{j}"
           end
         end
 

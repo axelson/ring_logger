@@ -1,14 +1,14 @@
 defmodule RingLogger.MixProject do
   use Mix.Project
 
-  @version "0.8.2"
+  @version "0.9.0"
   @source_url "https://github.com/nerves-project/ring_logger"
 
   def project do
     [
       app: :ring_logger,
       version: @version,
-      elixir: "~> 1.4",
+      elixir: "~> 1.9",
       start_permanent: Mix.env() == :prod,
       description: description(),
       package: package(),
@@ -46,8 +46,10 @@ defmodule RingLogger.MixProject do
   defp deps do
     [
       {:circular_buffer, "~> 0.4.0"},
+      {:benchee, "~> 1.1", only: :dev},
       {:ex_doc, "~> 0.18", only: :docs, runtime: false},
-      {:dialyxir, "~> 1.1.0", only: :dev, runtime: false}
+      {:dialyxir, "~> 1.2", only: :dev, runtime: false},
+      {:credo, "~> 1.5", only: :dev, runtime: false}
     ]
   end
 
@@ -64,7 +66,7 @@ defmodule RingLogger.MixProject do
 
   defp dialyzer() do
     [
-      flags: [:race_conditions, :unmatched_returns, :error_handling]
+      flags: [:missing_return, :extra_return, :unmatched_returns, :error_handling, :underspecs]
     ]
   end
 end

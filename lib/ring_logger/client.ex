@@ -1,35 +1,32 @@
 defmodule RingLogger.Client do
-  use GenServer
-  require Logger
-
   @moduledoc """
   Interact with the RingLogger
   """
+  use GenServer
 
   alias RingLogger.Server
 
-  defmodule State do
-    @moduledoc false
-    defstruct io: :stdio,
-              colors: %{
-                debug: :cyan,
-                info: :normal,
-                warn: :yellow,
-                error: :red,
-                enabled: IO.ANSI.enabled?()
-              },
-              metadata: [],
-              format: Logger.Formatter.compile(nil),
-              level: :debug,
-              index: 0,
-              module_levels: %{}
-  end
+  require Logger
+
+  defstruct io: :stdio,
+            colors: %{
+              debug: :cyan,
+              info: :normal,
+              warn: :yellow,
+              error: :red,
+              enabled: IO.ANSI.enabled?()
+            },
+            metadata: [],
+            format: Logger.Formatter.compile(nil),
+            level: :debug,
+            index: 0,
+            module_levels: %{}
 
   @doc """
   Start up a client GenServer. Except for just getting the contents of the ring buffer, you'll
   need to create one of these. See `configure/2` for information on options.
   """
-  @spec start_link(keyword()) :: GenServer.on_start()
+  @spec start_link(RingLogger.client_options()) :: GenServer.on_start()
   def start_link(config \\ []) do
     GenServer.start_link(__MODULE__, config)
   end
@@ -45,7 +42,7 @@ defmodule RingLogger.Client do
   @doc """
   Fetch the current client configuration.
   """
-  @spec config(pid()) :: [RingLogger.client_option()]
+  @spec config(pid()) :: RingLogger.client_options()
   def config(client_pid) do
     GenServer.call(client_pid, :config)
   end
@@ -66,7 +63,7 @@ defmodule RingLogger.Client do
     %{:my_app => :error, :my_other_app => :none}. Note log levels set in `:module_levels`
     will take precedence.
   """
-  @spec configure(GenServer.server(), [RingLogger.client_option()]) :: :ok
+  @spec configure(GenServer.server(), RingLogger.client_options()) :: :ok
   def configure(client_pid, config) do
     GenServer.call(client_pid, {:configure, config})
   end
@@ -94,7 +91,8 @@ defmodule RingLogger.Client do
 
   * `:pager` - an optional 2-arity function that takes an IO device and what to print
   """
-  @spec tail(GenServer.server(), non_neg_integer()) :: :ok | {:error, term()}
+  @spec tail(GenServer.server(), non_neg_integer(), RingLogger.client_options()) ::
+          :ok | {:error, term()}
   def tail(client_pid, n, opts \\ []) do
     {io, to_print} = GenServer.call(client_pid, {:tail, n})
 
@@ -109,12 +107,20 @@ defmodule RingLogger.Client do
 
   * `:pager` - an optional 2-arity function that takes an IO device and what to print
   """
-  @spec next(GenServer.server(), keyword()) :: :ok | {:error, term()}
+  @spec next(GenServer.server(), RingLogger.client_options()) :: :ok | {:error, term()}
   def next(client_pid, opts \\ []) do
     {io, to_print} = GenServer.call(client_pid, :next)
 
     pager = Keyword.get(opts, :pager, &IO.binwrite/2)
     pager.(io, to_print)
+  end
+
+  @doc """
+  Count the next set of the messages in the log.
+  """
+  @spec count_next(GenServer.server()) :: non_neg_integer()
+  def count_next(client_pid) do
+    GenServer.call(client_pid, :count_next)
   end
 
   @doc """
@@ -148,8 +154,10 @@ defmodule RingLogger.Client do
   Supported options:
 
   * `:pager` - an optional 2-arity function that takes an IO device and what to print
+  * `:before` - Number of lines before the match to include
+  * `:after` - NUmber of lines after the match to include
   """
-  @spec grep(GenServer.server(), String.t() | Regex.t(), [RingLogger.client_option()]) ::
+  @spec grep(GenServer.server(), String.t() | Regex.t(), RingLogger.client_options()) ::
           :ok | {:error, term()}
   def grep(client_pid, regex_or_string, opts \\ [])
 
@@ -160,7 +168,7 @@ defmodule RingLogger.Client do
   end
 
   def grep(client_pid, %Regex{} = regex, opts) do
-    {io, to_print} = GenServer.call(client_pid, {:grep, regex})
+    {io, to_print} = GenServer.call(client_pid, {:grep, regex, opts})
 
     pager = Keyword.get(opts, :pager, &IO.binwrite/2)
     pager.(io, to_print)
@@ -224,6 +232,14 @@ defmodule RingLogger.Client do
     end
   end
 
+  def handle_call(:count_next, _from, state) do
+    count =
+      Server.get(state.index, 0)
+      |> Enum.count(&should_print?(&1, state))
+
+    {:reply, count, state}
+  end
+
   def handle_call({:tail, n}, _from, state) do
     to_return =
       Server.tail(n)
@@ -237,13 +253,20 @@ defmodule RingLogger.Client do
     {:reply, :ok, %{state | index: 0}}
   end
 
-  def handle_call({:grep, regex}, _from, state) do
+  def handle_call({:grep, regex, opts}, _from, state) do
+    formatted_buff =
+      for {message, i} <- Enum.with_index(Server.get(0, 0)),
+          should_print?(message, state),
+          formatted = format_message(message, state),
+          bin = IO.chardata_to_string(formatted),
+          do: {bin, Regex.match?(regex, bin), i}
+
+    extras = determine_extra_grep_lines(formatted_buff, opts)
+
     to_return =
-      Server.get(0, 0)
-      |> Enum.filter(fn message -> should_print?(message, state) end)
-      |> Enum.map(fn message -> format_message(message, state) end)
-      |> Enum.map(&IO.iodata_to_binary/1)
-      |> Enum.filter(&Regex.match?(regex, &1))
+      for {bin, matched?, i} <- formatted_buff, matched? or i in extras do
+        if matched?, do: maybe_color_grep(bin, regex, state), else: bin
+      end
 
     {:reply, {state.io, to_return}, state}
   end
@@ -288,8 +311,8 @@ defmodule RingLogger.Client do
     Logger.Formatter.format(format, level, msg, ts, metadata)
   end
 
-  defp configure_state(config, state \\ %State{}) do
-    defaults = Application.get_all_env(:ring_logger)
+  defp configure_state(config, state \\ %__MODULE__{}) do
+    defaults = build_defaults()
 
     config =
       Keyword.merge(defaults, config)
@@ -299,6 +322,38 @@ defmodule RingLogger.Client do
     config = Keyword.put(config, :module_levels, configure_module_levels(config))
 
     struct(state, config)
+  end
+
+  defp build_defaults() do
+    deprecated_defaults = Application.get_all_env(:ring_logger)
+
+    defaults =
+      Application.get_env(:logger, RingLogger, [])
+      |> Keyword.put_new(:colors, [])
+
+    merge_deprecated_defaults(deprecated_defaults, defaults)
+  end
+
+  defp merge_deprecated_defaults([], defaults), do: defaults
+
+  defp merge_deprecated_defaults(deprecated_defaults, defaults) do
+    message = """
+    Setting RingLogger configuration under `:ring_logger` is deprecated. Instead configuration should be set under :logger, RingLogger
+
+    In your config.exs or other configuration file change:
+
+        config :ring_logger,
+          <configurations>
+
+    To:
+
+        config :logger, RingLogger,
+          <configurations>
+    """
+
+    IO.warn(message)
+
+    Keyword.merge(deprecated_defaults, defaults)
   end
 
   defp configure_option({:colors, colors}) do
@@ -376,6 +431,7 @@ defmodule RingLogger.Client do
     Logger.Formatter.compile(format)
   end
 
+  @spec configure_module_levels(RingLogger.client_options()) :: map()
   def configure_module_levels(config) do
     module_levels = Keyword.get(config, :module_levels, %{})
 
@@ -401,7 +457,7 @@ defmodule RingLogger.Client do
     Keyword.get(meta, :module)
   end
 
-  defp should_print?({level, _} = msg, %State{module_levels: module_levels} = state) do
+  defp should_print?({level, _} = msg, %__MODULE__{module_levels: module_levels} = state) do
     module = get_module_from_msg(msg)
 
     with module_level when not is_nil(module_level) <- Map.get(module_levels, module),
@@ -422,5 +478,24 @@ defmodule RingLogger.Client do
 
   defp summary(messages, to_return) do
     "\n#{Enum.count(to_return)} out of #{Enum.count(messages)} new messages shown.\n"
+  end
+
+  defp maybe_color_grep(bin, regex, %{colors: %{enabled: true}}) do
+    Regex.replace(regex, bin, &IO.ANSI.format_fragment([:inverse, &1, :inverse_off], true))
+  end
+
+  defp maybe_color_grep(bin, _regex, _state), do: bin
+
+  defp determine_extra_grep_lines(buff, opts) do
+    if Keyword.has_key?(opts, :before) or Keyword.has_key?(opts, :after) do
+      before = opts[:before] || 0
+      aft = opts[:after] || 0
+
+      for({_, true, i} <- buff, do: Enum.to_list((i - before)..(i + aft)))
+      |> List.flatten()
+      |> Enum.uniq()
+    else
+      []
+    end
   end
 end

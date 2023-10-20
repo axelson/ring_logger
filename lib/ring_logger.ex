@@ -1,6 +1,4 @@
 defmodule RingLogger do
-  @behaviour :gen_event
-
   @moduledoc """
   This is an in-memory ring buffer backend for the Elixir Logger.
 
@@ -9,12 +7,33 @@ defmodule RingLogger do
   ```elixir
   use Mix.Config
 
-  # Add the RingLogger backend. This removes the
-  # default :console backend.
+  # Add the RingLogger backend. This removes the default :console backend.
   config :logger, backends: [RingLogger]
 
-  # Set the number of messages to hold in the circular buffer
+  # Save messages to one circular buffer that holds 1024 entries.
   config :logger, RingLogger, max_size: 1024
+
+  # Separate out `:error` and `:warning` messages to their own circular buffer.
+  # All other log messages are stored in the default circular buffer.
+  config :logger, RingLogger, buffers: %{
+    errors: %{
+      levels: [:error, :warning],
+      max_size: 1024
+    }
+  }
+
+  # Specify circular buffers for all log levels. The default circular buffer won't
+  # be used in this example configuration.
+  config :logger, RingLogger, buffers: %{
+    low_priority: %{
+      levels: [:warning, :notice, :info, :debug],
+      max_size: 1024
+    },
+    high_priority: %{
+      levels: [:emergency, :alert, :critical, :error],
+      max_size: 1024
+    }
+  ]
   ```
 
   Or add manually:
@@ -31,17 +50,19 @@ defmodule RingLogger do
   you're writing a program that needs to get log messages, use `get` or
   `start_link` a `RingLogger.Client` and call its methods directly.
   """
+  @behaviour :gen_event
 
-  alias RingLogger.{Server, Autoclient}
+  alias RingLogger.Autoclient
+  alias RingLogger.Server
 
   @typedoc "Option values used by the ring logger"
-  @type server_option :: {:max_size, pos_integer()}
+  @type server_option() :: {:max_size, pos_integer()}
 
   @typedoc "Callback function for printing/paging tail, grep, and next output"
-  @type pager_fun :: (IO.device(), iodata() -> :ok | {:error, term()})
+  @type pager_fun() :: (IO.device(), IO.chardata() -> :ok | {:error, term()})
 
   @typedoc "Option values used by client-side functions like `attach` and `tail`"
-  @type client_option ::
+  @type client_option() ::
           {:io, term}
           | {:pager, pager_fun()}
           | {:color, term}
@@ -51,11 +72,15 @@ defmodule RingLogger do
           | {:module_levels, map()}
           | {:application_levels, map()}
 
-  @typedoc "A tuple holding a raw, unformatted log entry"
-  @type entry ::
-          {module(), Logger.level(), Logger.message(), Logger.Formatter.time(), Logger.metadata()}
+  @typedoc "Option list for client-side functions"
+  @type client_options() :: [client_option()]
 
-  @typep custom_formatter :: {module, function}
+  @typedoc "A tuple holding a raw, unformatted log entry"
+  @type entry() ::
+          {Logger.level(),
+           {module(), Logger.message(), Logger.Formatter.time(), Logger.metadata()}}
+
+  @typep custom_formatter() :: {module, function}
 
   #
   # API
@@ -78,31 +103,44 @@ defmodule RingLogger do
     %{:my_app => :error, :my_other_app => :none}. Note log levels set in `:module_levels`
     will take precedence.
   """
-  @spec attach([client_option]) :: :ok
+  @spec attach(client_options()) :: :ok | {:error, :no_client}
   defdelegate attach(opts \\ []), to: Autoclient
 
   @doc """
   Fetch the current configuration for the attached client
   """
-  @spec config() :: [client_option()]
+  @spec config() :: client_options() | {:error, :no_client}
   defdelegate config(), to: Autoclient
 
   @doc """
-  Detach the current IEx session from the logger.
+  Detach the current IEx session from the logger
   """
   @spec detach() :: :ok
   defdelegate detach(), to: Autoclient
 
   @doc """
-  Print the next messages in the log.
+  Print the next messages in the log
 
   Options include:
 
   * Options from `attach/1`
   * `:pager` - a function for printing log messages to the console. Defaults to `IO.binwrite/2`.
   """
-  @spec next([client_option]) :: :ok | {:error, term()}
+  @spec next(client_options()) :: :ok | {:error, term()}
   defdelegate next(opts \\ []), to: Autoclient
+
+  @doc """
+  Count the next messages in the log
+
+  NOTE: This function may change in future releases.
+
+  Options include:
+
+  * Options from `attach/1`
+  * `:pager` - a function for printing log messages to the console. Defaults to `IO.binwrite/2`.
+  """
+  @spec count_next(client_options()) :: non_neg_integer()
+  defdelegate count_next(opts \\ []), to: Autoclient
 
   @doc """
   Save the contents of the log to the specified path
@@ -114,23 +152,36 @@ defmodule RingLogger do
   defdelegate save(path), to: Autoclient
 
   @doc """
-  Print the last n messages in the log.
+  Print the last 10 messages
+  """
+  @spec tail() :: :ok
+  def tail(), do: Autoclient.tail(10, [])
+
+  @doc """
+  Print the last messages in the log
+
+  See `tail/2`.
+  """
+
+  @spec tail(non_neg_integer() | client_options()) :: :ok
+  def tail(opts) when is_list(opts), do: Autoclient.tail(10, opts)
+  def tail(n) when is_integer(n), do: Autoclient.tail(n, [])
+
+  @doc """
+  Print the last n messages in the log
 
   Options include:
 
   * Options from `attach/1`
   * `:pager` - a function for printing log messages to the console. Defaults to `IO.binwrite/2`.
   """
-  @spec tail(non_neg_integer(), [client_option]) :: :ok | {:error, term()}
-  def tail(), do: Autoclient.tail(10, [])
-  def tail(opts) when is_list(opts), do: Autoclient.tail(10, opts)
-  def tail(n) when is_integer(n), do: Autoclient.tail(n, [])
+  @spec tail(non_neg_integer(), client_options()) :: :ok
   def tail(n, opts), do: Autoclient.tail(n, opts)
 
   @doc """
   Reset the index into the log for `next/1` to the oldest entry.
   """
-  @spec reset([client_option]) :: :ok | {:error, term()}
+  @spec reset(client_options()) :: :ok | {:error, term()}
   defdelegate reset(opts \\ []), to: Autoclient
 
   @doc """
@@ -145,15 +196,17 @@ defmodule RingLogger do
 
   * Options from `attach/1`
   * `:pager` - a function for printing log messages to the console. Defaults to `IO.binwrite/2`.
+  * `:before` - Number of lines before the match to include
+  * `:after` - NUmber of lines after the match to include
   """
-  @spec grep(Regex.t() | String.t(), [client_option]) :: :ok | {:error, term()}
+  @spec grep(Regex.t() | String.t(), client_options()) :: :ok | {:error, term()}
   defdelegate grep(regex_or_string, opts \\ []), to: Autoclient
 
   @doc """
   Helper method for formatting log messages per the current client's
   configuration.
   """
-  @spec format(entry()) :: :ok
+  @spec format(entry()) :: :ok | {:error, :no_client}
   defdelegate format(message), to: Autoclient
 
   @doc """
@@ -191,6 +244,9 @@ defmodule RingLogger do
       {:ok, _pid} ->
         {:ok, configure(opts)}
 
+      err when is_atom(err) ->
+        {:error, err}
+
       error ->
         error
     end
@@ -204,8 +260,26 @@ defmodule RingLogger do
     {:ok, :ok, configure(opts)}
   end
 
+  def add_blame({Logger, _orig_message, time_info, metadata} = orig) do
+    case Keyword.get(metadata, :crash_reason) do
+      {maybe_exception, stacktrace} ->
+        if Exception.exception?(maybe_exception) do
+          {exception, _} = Exception.blame(:error, maybe_exception, stacktrace)
+          {Logger, Exception.format(:error, exception, stacktrace), time_info, metadata}
+        else
+          orig
+        end
+
+      _ ->
+        orig
+    end
+  end
+
+  def add_blame(orig), do: orig
+
   @impl :gen_event
   def handle_event({level, _group_leader, message}, state) do
+    message = add_blame(message)
     # Messages eventually are flattened. Flattening them immediately saves time
     # later and appears to measurably reduce memory usage and reduction count
     # in RingLogger.Server in production devices.
@@ -237,6 +311,6 @@ defmodule RingLogger do
   end
 
   defp flatten({mod, msg, ts, md}) do
-    {mod, IO.iodata_to_binary(msg), ts, md}
+    {mod, IO.chardata_to_string(msg), ts, md}
   end
 end

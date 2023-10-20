@@ -3,8 +3,13 @@ defmodule RingLoggerTest do
   doctest RingLogger
 
   import ExUnit.CaptureIO
-  require Logger
   alias RingLogger.TestCustomFormatter
+
+  require Logger
+
+  # Elixir 1.4 changed the default pattern (removed $levelpad) so hardcode a default
+  # pattern here
+  @default_pattern "\n$time $metadata[$level] $message\n"
 
   setup do
     {:ok, pid} = RingLogger.TestIO.start(self())
@@ -15,7 +20,7 @@ defmodule RingLoggerTest do
     Logger.flush()
 
     Logger.add_backend(RingLogger)
-    Logger.configure_backend(RingLogger, max_size: 10)
+    Logger.configure_backend(RingLogger, max_size: 10, format: @default_pattern, buffers: [])
 
     on_exit(fn ->
       RingLogger.TestIO.stop(pid)
@@ -25,19 +30,17 @@ defmodule RingLoggerTest do
     {:ok, [io: pid]}
   end
 
-  @doc """
-  Ensure that a log message makes it way through the logger processes.
-
-  The RingLogger needs to be attached for this to work. This makes
-  logging synchronous so that we can test tail, next, grep, etc. that
-  rely on the messages being received by RingLogger.
-  """
-  def handshake_log(io, level, message) do
+  # Ensure that a log message makes it way through the logger processes.
+  #
+  # The RingLogger needs to be attached for this to work. This makes
+  # logging synchronous so that we can test tail, next, grep, etc. that
+  # rely on the messages being received by RingLogger.
+  defp handshake_log(io, level, message) do
     Logger.log(level, message)
     assert_receive {:io, msg}
     assert String.contains?(msg, to_string(level))
 
-    flattened_message = IO.iodata_to_binary(message)
+    flattened_message = IO.chardata_to_string(message)
     assert String.contains?(msg, flattened_message)
     io
   end
@@ -111,7 +114,7 @@ defmodule RingLoggerTest do
     |> handshake_log(:debug, "Hello")
     |> handshake_log(:debug, "World")
 
-    RingLogger.grep(~r/H..lo/, io: io)
+    RingLogger.grep(~r/H..lo/, io: io, colors: [enabled: false])
     assert_receive {:io, message}
     assert message =~ "[debug] Hello"
   end
@@ -123,7 +126,7 @@ defmodule RingLoggerTest do
     |> handshake_log(:debug, ["Hello", ",", ' world'])
     |> handshake_log(:debug, "World")
 
-    RingLogger.grep(~r/H..lo/, io: io)
+    RingLogger.grep(~r/H..lo/, io: io, colors: [enabled: false])
     assert_receive {:io, message}
     assert message =~ "[debug] Hello, world"
   end
@@ -135,9 +138,44 @@ defmodule RingLoggerTest do
     |> handshake_log(:debug, "Hello")
     |> handshake_log(:debug, "World")
 
-    RingLogger.grep("H..lo", io: io)
+    RingLogger.grep("H..lo", io: io, colors: [enabled: false])
     assert_receive {:io, message}
     assert message =~ "[debug] Hello"
+  end
+
+  test "can colorize grep log", %{io: io} do
+    :ok = RingLogger.attach(io: io)
+
+    io
+    |> handshake_log(:debug, "Hello")
+    |> handshake_log(:debug, "World")
+
+    RingLogger.grep(~r/H..lo/, io: io, colors: [enabled: true])
+    assert_receive {:io, message}
+    assert message =~ "[debug] #{IO.ANSI.inverse()}Hello#{IO.ANSI.inverse_off()}"
+  end
+
+  test "can grep before and after lines", %{io: io} do
+    :ok = RingLogger.attach(io: io)
+
+    io
+    |> handshake_log(:debug, "b3")
+    |> handshake_log(:debug, "b2")
+    |> handshake_log(:debug, "b1")
+    |> handshake_log(:debug, "howdy")
+    |> handshake_log(:debug, "a1")
+    |> handshake_log(:debug, "a2")
+    |> handshake_log(:debug, "a3")
+
+    RingLogger.grep(~r/howdy/, before: 2, after: 2, io: io, colors: [enabled: false])
+    assert_receive {:io, message}
+    refute message =~ "[debug] b3"
+    assert message =~ "[debug] b2"
+    assert message =~ "[debug] b1"
+    assert message =~ "[debug] howdy"
+    assert message =~ "[debug] a1"
+    assert message =~ "[debug] a2"
+    refute message =~ "[debug] a3"
   end
 
   test "invalid regex returns error", %{io: io} do
@@ -257,19 +295,19 @@ defmodule RingLoggerTest do
     |> handshake_log(:debug, "Foo")
     |> handshake_log(:debug, "Bar")
 
-    # Even thought the intention for a custom pager is to "page" the output to the user,
+    # Even though the intention for a custom pager is to "page" the output to the user,
     # just print out the number of characters as a check that the custom function is
     # actually run.
     :ok =
       RingLogger.next(
         pager: fn device, msg ->
-          IO.write(device, "Got #{String.length(IO.iodata_to_binary(msg))} characters")
+          IO.write(device, "Got #{String.length(IO.chardata_to_string(msg))} characters")
         end
       )
 
     assert_receive {:io, messages}
 
-    assert messages =~ "Got 139 characters"
+    assert messages =~ "Got 138 characters"
   end
 
   test "tail supports passing a custom pager", %{io: io} do
@@ -283,7 +321,7 @@ defmodule RingLoggerTest do
     :ok =
       RingLogger.tail(2,
         pager: fn device, msg ->
-          IO.write(device, "Got #{String.length(IO.iodata_to_binary(msg))} characters")
+          IO.write(device, "Got #{String.length(IO.chardata_to_string(msg))} characters")
         end
       )
 
@@ -303,13 +341,13 @@ defmodule RingLoggerTest do
     :ok =
       RingLogger.grep(~r/debug/,
         pager: fn device, msg ->
-          IO.write(device, "Got #{String.length(IO.iodata_to_binary(msg))} characters")
+          IO.write(device, "Got #{String.length(IO.chardata_to_string(msg))} characters")
         end
       )
 
     assert_receive {:io, messages}
 
-    assert messages =~ "Got 70 characters"
+    assert messages =~ "Got 88 characters"
   end
 
   test "buffer start index is less then buffer_start_index", %{io: io} do
@@ -403,9 +441,9 @@ defmodule RingLoggerTest do
     :ok = RingLogger.attach(io: io, module_levels: %{__MODULE__ => :info})
     handshake_log(io, :info, "Hello")
 
-    RingLogger.grep(~r/H..lo/, io: io)
+    RingLogger.grep(~r/H..lo/, io: io, colors: [enabled: false])
     assert_receive {:io, message}
-    assert String.contains?(message, "[info]  Hello")
+    assert String.contains?(message, "[info] Hello")
   end
 
   test "can save to a file", %{io: io} do
@@ -432,13 +470,20 @@ defmodule RingLoggerTest do
     assert {:error, :enoent} == RingLogger.save("/a/b/c/d/e/f/g")
   end
 
+  test "logging chardata", %{io: io} do
+    :ok = RingLogger.attach(io: io)
+    Logger.info('Cześć!')
+    assert_receive {:io, message}
+    assert message =~ "[info] Cześć!"
+  end
+
   describe "fetching config" do
     test "can retrieve config for attached client", %{io: io} do
       :ok = RingLogger.attach(io: io)
 
       config = [
         colors: %{debug: :cyan, enabled: true, error: :red, info: :normal, warn: :yellow},
-        format: ["\n", :time, " ", :metadata, "[", :level, "] ", :levelpad, :message, "\n"],
+        format: ["\n", :time, " ", :metadata, "[", :level, "] ", :message, "\n"],
         io: io,
         level: :debug,
         metadata: [],
@@ -450,6 +495,146 @@ defmodule RingLoggerTest do
 
     test "returns error when no attached client" do
       assert RingLogger.config() == {:error, :no_client}
+    end
+  end
+
+  describe "multiple buffers" do
+    test "setting multiple buffers", %{io: io} do
+      Logger.configure_backend(RingLogger,
+        buffers: %{
+          errors: %{
+            levels: [:warning, :errors],
+            max_size: 10
+          }
+        }
+      )
+
+      :ok = RingLogger.attach(io: io)
+    end
+
+    test "different levels use different buffers", %{io: io} do
+      Logger.configure_backend(RingLogger,
+        buffers: %{
+          debug: %{
+            levels: [:debug],
+            max_size: 10
+          },
+          error: %{
+            levels: [:error],
+            max_size: 10
+          }
+        }
+      )
+
+      :ok = RingLogger.attach(io: io)
+
+      io
+      |> handshake_log(:error, "one")
+      |> handshake_log(:error, "two")
+      |> handshake_log(:error, "three")
+      |> handshake_log(:debug, "bar")
+      |> handshake_log(:debug, "bar")
+      |> handshake_log(:debug, "bar")
+      |> handshake_log(:debug, "bar")
+      |> handshake_log(:debug, "bar")
+      |> handshake_log(:debug, "bar")
+      |> handshake_log(:debug, "bar")
+      |> handshake_log(:debug, "bar")
+      |> handshake_log(:debug, "bar")
+      |> handshake_log(:debug, "bar")
+
+      buffer = RingLogger.get(0, 0)
+
+      # Should include the first 3 errors
+      [{:error, _}, {:error, _}, {:error, _} | _] = buffer
+    end
+
+    test "multiple buffers and indexing", %{io: io} do
+      Logger.configure_backend(RingLogger,
+        buffers: %{
+          debug: %{
+            levels: [:debug],
+            max_size: 3
+          },
+          error: %{
+            levels: [:error],
+            max_size: 3
+          }
+        }
+      )
+
+      :ok = RingLogger.attach(io: io)
+
+      io
+      |> handshake_log(:error, "one")
+      |> handshake_log(:error, "two")
+      |> handshake_log(:debug, "bar")
+      |> handshake_log(:error, "three")
+      |> handshake_log(:debug, "bar")
+
+      buffer = RingLogger.get(2, 3)
+
+      [{:debug, _}, {:error, _}, {:debug, _}] = buffer
+    end
+
+    test "`get(starting_index, 0)` returns everything after the starting index", %{io: io} do
+      Logger.configure_backend(RingLogger,
+        buffers: %{
+          debug: %{
+            levels: [:debug],
+            max_size: 3
+          },
+          error: %{
+            levels: [:error],
+            max_size: 3
+          }
+        }
+      )
+
+      :ok = RingLogger.attach(io: io)
+
+      io
+      |> handshake_log(:error, "one")
+      |> handshake_log(:debug, "bar")
+      |> handshake_log(:error, "two")
+      |> handshake_log(:error, "three")
+      |> handshake_log(:debug, "bar")
+
+      buffer = RingLogger.get(1, 0)
+
+      [{:debug, _}, {:error, _}, {:error, _}, {:debug, _}] = buffer
+    end
+
+    test "tailing multiple buffers", %{io: io} do
+      Logger.configure_backend(RingLogger,
+        buffers: %{
+          debug: %{
+            levels: [:debug],
+            max_size: 3
+          },
+          error: %{
+            levels: [:error],
+            max_size: 3
+          }
+        }
+      )
+
+      :ok = RingLogger.attach(io: io)
+
+      io
+      |> handshake_log(:error, "one")
+      |> handshake_log(:debug, "bar")
+      |> handshake_log(:error, "two")
+      |> handshake_log(:error, "three")
+      |> handshake_log(:debug, "baz")
+
+      :ok = RingLogger.tail(3)
+
+      assert_receive {:io, logs}
+
+      logs = String.replace(logs, "\n", " ")
+
+      assert logs =~ ~r/\[error\] two.+\[error\] three.+\[debug\] baz/
     end
   end
 
